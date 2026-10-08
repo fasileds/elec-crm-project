@@ -1,4 +1,5 @@
 import { prisma } from "@/lib/db";
+import { textMatch } from "@/lib/text";
 import type { Actor } from "@/lib/actor";
 import { can, requireEmployee, requirePermission } from "@/lib/actor";
 import { customerListScope, projectListScope } from "@/lib/domain/access";
@@ -295,31 +296,31 @@ export async function searchAll(actor: Actor, q: string) {
     : { organizationId: actor.organizationId, ...projectListScope(actor) };
   const [customers, contacts, projectRows, tasks, requirements, documents, people] = await Promise.all([
     actor.kind === "employee"
-      ? prisma.customer.findMany({ where: { organizationId: actor.organizationId, ...customerScope, searchText: { contains: term } }, take: 8, select: { id: true, name: true, code: true, status: true } })
+      ? prisma.customer.findMany({ where: { organizationId: actor.organizationId, ...customerScope, searchText: textMatch(term) }, take: 8, select: { id: true, name: true, code: true, status: true } })
       : Promise.resolve([]),
     prisma.contact.findMany({
-      where: { organizationId: actor.organizationId, archivedAt: null, searchText: { contains: term }, ...(actor.kind === "customer" ? { customerId: actor.customerId ?? "__none__" } : {}) },
+      where: { organizationId: actor.organizationId, archivedAt: null, searchText: textMatch(term), ...(actor.kind === "customer" ? { customerId: actor.customerId ?? "__none__" } : {}) },
       take: 8,
       select: { id: true, name: true, email: true, customerId: true },
     }),
-    prisma.project.findMany({ where: { ...projects, searchText: { contains: term } }, take: 8, select: { id: true, name: true, code: true, status: true } }),
+    prisma.project.findMany({ where: { ...projects, searchText: textMatch(term) }, take: 8, select: { id: true, name: true, code: true, status: true } }),
     prisma.task.findMany({
-      where: { organizationId: actor.organizationId, searchText: { contains: term }, ...(actor.kind === "customer" ? { customerVisible: true, project: { customerId: actor.customerId ?? "__none__" } } : { project: projectListScope(actor) }) },
+      where: { organizationId: actor.organizationId, searchText: textMatch(term), ...(actor.kind === "customer" ? { customerVisible: true, project: { customerId: actor.customerId ?? "__none__" } } : { project: projectListScope(actor) }) },
       take: 8,
       select: { id: true, title: true, code: true, projectId: true, status: true },
     }),
     prisma.requirement.findMany({
-      where: { organizationId: actor.organizationId, searchText: { contains: term }, ...(actor.kind === "customer" ? { customerVisible: true, project: { customerId: actor.customerId ?? "__none__" } } : {}) },
+      where: { organizationId: actor.organizationId, searchText: textMatch(term), ...(actor.kind === "customer" ? { customerVisible: true, project: { customerId: actor.customerId ?? "__none__" } } : {}) },
       take: 8,
       select: { id: true, title: true, code: true, projectId: true, status: true },
     }),
     prisma.document.findMany({
-      where: { organizationId: actor.organizationId, fileName: { contains: term }, ...(actor.kind === "customer" ? { visibility: "customer", customerId: actor.customerId ?? "__none__" } : {}) },
+      where: { organizationId: actor.organizationId, fileName: textMatch(term), ...(actor.kind === "customer" ? { visibility: "customer", customerId: actor.customerId ?? "__none__" } : {}) },
       take: 8,
       select: { id: true, fileName: true, projectId: true, visibility: true },
     }),
     actor.kind === "employee" && can(actor, "employees.view")
-      ? prisma.user.findMany({ where: { organizationId: actor.organizationId, kind: "employee", OR: [{ name: { contains: term } }, { email: { contains: term } }] }, take: 8, select: { id: true, name: true, email: true, jobTitle: true } })
+      ? prisma.user.findMany({ where: { organizationId: actor.organizationId, kind: "employee", OR: [{ name: textMatch(term) }, { email: textMatch(term) }] }, take: 8, select: { id: true, name: true, email: true, jobTitle: true } })
       : Promise.resolve([]),
   ]);
   return { customers, contacts, projects: projectRows, tasks, requirements, documents, people };

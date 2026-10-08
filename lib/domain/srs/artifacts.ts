@@ -1,24 +1,16 @@
 import { createHash, randomBytes } from "node:crypto";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
-import path from "node:path";
 import { prisma } from "@/lib/db";
 import type { Actor } from "@/lib/actor";
 import { requirePermission } from "@/lib/actor";
 import { writeAudit } from "@/lib/domain/support";
 import { forbidden, notFound, validationError } from "@/lib/errors";
 import { log } from "@/lib/log";
+import { getObject, putObject } from "@/lib/storage";
 import { loadSrs, versionLabel } from "@/lib/domain/srs/core";
 import { buildDocModel, loadDocInputs, type DocModel, type DocSigner } from "@/lib/domain/srs/model";
 
-const ROOT = path.resolve(process.cwd(), "storage");
 const MEDIA = { pdf: "application/pdf", docx: "application/vnd.openxmlformats-officedocument.wordprocessingml.document" } as const;
 export type SrsFormat = keyof typeof MEDIA;
-
-function storagePath(key: string) {
-  const absolute = path.resolve(ROOT, key);
-  if (!absolute.startsWith(ROOT + path.sep)) throw forbidden("Invalid storage path.");
-  return absolute;
-}
 
 export function srsFileName(projectCode: string, label: string, format: SrsFormat, suffix = "") {
   const safe = (value: string) => value.replace(/\.{2,}/g, "").replace(/[^A-Za-z0-9.-]+/g, "-").replace(/-+/g, "-").replace(/^-|-$/g, "");
@@ -57,10 +49,8 @@ export async function storeApprovedArtifacts(versionId: string, createdByName: s
     const exists = await prisma.srsArtifact.findUnique({ where: { versionId_format: { versionId, format } } });
     if (exists) continue;
     const bytes = await renderModel(model, format);
-    const storageKey = path.posix.join(version.document.project.organizationId, "srs", randomBytes(16).toString("hex"));
-    const absolute = storagePath(storageKey);
-    await mkdir(path.dirname(absolute), { recursive: true });
-    await writeFile(absolute, bytes, { flag: "wx" });
+    const storageKey = `${version.document.project.organizationId}/srs/${randomBytes(16).toString("hex")}`;
+    await putObject(storageKey, bytes, MEDIA[format]);
     try {
       await prisma.srsArtifact.create({
         data: { documentId: version.documentId, versionId, format, fileName: srsFileName(version.document.project.code, version.label, format), storageKey, sha256: createHash("sha256").update(bytes).digest("hex"), byteSize: bytes.byteLength, createdByName },
@@ -102,7 +92,7 @@ export async function downloadSrs(actor: Actor, documentId: string, input: { ref
         artifact = await prisma.srsArtifact.findUnique({ where: { versionId_format: { versionId: version.id, format } } });
       }
       if (!artifact) throw notFound("The approved file is not available yet. Try again shortly.");
-      bytes = await readFile(storagePath(artifact.storageKey));
+      bytes = await getObject(artifact.storageKey);
       if (createHash("sha256").update(bytes).digest("hex") !== artifact.sha256) {
         log("error", "srs.artifact_tampered", { artifactId: artifact.id });
         throw forbidden("The stored approved file failed its integrity check. An administrator has been alerted.");

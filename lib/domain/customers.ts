@@ -12,7 +12,7 @@ import {
 } from "@/lib/domain/support";
 import type { Prisma } from "@prisma/client";
 import { conflict, validationError } from "@/lib/errors";
-import { cleanText, searchBlob } from "@/lib/text";
+import { cleanText, searchBlob, textMatch } from "@/lib/text";
 
 export type CustomerInput = {
   name: string;
@@ -45,7 +45,7 @@ export async function listCustomers(actor: Actor, query: { page?: number; q?: st
     ...customerListScope(actor),
     ...(query.status ? { status: query.status } : {}),
     ...(query.tag ? { tags: { some: { tag: { name: query.tag } } } } : {}),
-    ...(q ? { searchText: { contains: q } } : {}),
+    ...(q ? { searchText: textMatch(q) } : {}),
   };
   const [total, rows] = await prisma.$transaction([
     prisma.customer.count({ where }),
@@ -221,7 +221,7 @@ export async function findDuplicates(actor: Actor, input: { name?: string; email
       OR: [
         ...(email ? [{ email }] : []),
         ...(phone ? [{ phone: { contains: phone.slice(-7) } }] : []),
-        ...(name && name.length > 2 ? [{ searchText: { contains: name } }] : []),
+        ...(name && name.length > 2 ? [{ searchText: textMatch(name) }] : []),
       ],
     },
     take: 8,

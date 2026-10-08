@@ -2,6 +2,7 @@ import bcrypt from "bcryptjs";
 import { afterAll, beforeEach, describe, expect, it } from "vitest";
 import type { Actor } from "@/lib/actor";
 import { prisma } from "@/lib/db";
+import { resetDatabase } from "./reset";
 import { provisionOrganization } from "@/lib/domain/bootstrap";
 import { completeOnboarding, createProject, startProjectFromOpportunity, transitionProject } from "@/lib/domain/projects";
 import { NFR_CATEGORIES, allQuestions } from "@/lib/domain/srs/catalog";
@@ -10,13 +11,6 @@ import { addCriterion, createItem, generateFromAnswers, saveAnswer, setNfrApplic
 import { addSrsComment, assessChangeRequest, compareVersions, decideChangeRequest, getSrsWorkspace, resolveSrsComment, signSrs, submitChangeRequest, transitionSrs } from "@/lib/domain/srs/workflow";
 import { downloadSrs, srsFileName } from "@/lib/domain/srs/artifacts";
 import { parseTemplateConfig, saveTemplateVersion } from "@/lib/domain/srs/templates";
-
-async function resetDatabase() {
-  const tables = await prisma.$queryRawUnsafe<Array<{ name: string }>>("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' AND name NOT LIKE '_prisma_%'");
-  await prisma.$executeRawUnsafe("PRAGMA foreign_keys = OFF");
-  for (const table of tables) await prisma.$executeRawUnsafe(`DELETE FROM "${table.name}"`);
-  await prisma.$executeRawUnsafe("PRAGMA foreign_keys = ON");
-}
 
 async function makeActor(roleKey: string, kind: Actor["kind"] = "employee", customerId: string | null = null, name = roleKey) {
   const org = await prisma.organization.findUniqueOrThrow({ where: { slug: "elec" } });
@@ -158,7 +152,7 @@ describe("SRS edge cases", () => {
     const next = await createSrs(owner.actor, project.id, { mode: "separate", reason: "Second product line" });
     const fresh = await prisma.srsDocument.findUniqueOrThrow({ where: { id: next.id }, include: { templateVersion: true } });
     expect(fresh.templateVersion.version).toBe(saved.version);
-    await expect(prisma.$executeRawUnsafe(`UPDATE "SrsTemplateVersion" SET "config" = '{}' WHERE "id" = ?`, before.templateVersionId)).rejects.toThrow(/immutable/);
+    await expect(prisma.$executeRawUnsafe(`UPDATE "SrsTemplateVersion" SET "config" = '{}' WHERE "id" = $1`, before.templateVersionId)).rejects.toThrow(/immutable/);
   });
 
   it("makes archived projects read-only and hides revoked documents from clients", async () => {
@@ -183,7 +177,7 @@ describe("SRS edge cases", () => {
     await expect(saveAnswer(pm.actor, doc.id, { questionKey: "purpose", value: "Late edit", expectedVersion: 0 })).rejects.toMatchObject({ status: 409 });
     await expect(createItem(pm.actor, doc.id, { kind: "functional", title: "Late item" })).rejects.toMatchObject({ status: 409 });
     await expect(addSrsComment(pm.actor, doc.id, { body: "Late comment" })).rejects.toMatchObject({ status: 409 });
-  }, 30_000);
+  });
 
   it("produces safe download names", () => {
     expect(srsFileName("../../PRJ 0001", "1.0", "pdf", "DRAFT")).toBe("ELEC-NOVA-PRJ-0001-SRS-v1.0-DRAFT.pdf");
@@ -210,7 +204,7 @@ describe("SRS approval lifecycle", () => {
     const { versionId } = await transitionSrs(pm.actor, doc.id, "approval_pending", { version: current.version });
     expect(versionId).toBeTruthy();
     await expect(updateItem(pm.actor, frs[0].id, { title: "Sneaky edit", version: frs[0].version })).rejects.toMatchObject({ status: 409 });
-    await expect(prisma.$executeRawUnsafe(`UPDATE "SrsItem" SET "title" = 'Raw edit' WHERE "id" = ?`, frs[0].id)).rejects.toThrow(/locked/);
+    await expect(prisma.$executeRawUnsafe(`UPDATE "SrsItem" SET "title" = 'Raw edit' WHERE "id" = $1`, frs[0].id)).rejects.toThrow(/locked/);
 
     await expect(signSrs(client.actor, doc.id, { versionId: versionId!, decision: "approved", typedName: "Someone Else", accept: true })).rejects.toMatchObject({ status: 422 });
     expect((await signSrs(client.actor, doc.id, { versionId: versionId!, decision: "approved", typedName: "cleo client", accept: true, ipAddress: "203.0.113.5" })).outcome).toBe("pending");
@@ -222,11 +216,11 @@ describe("SRS approval lifecycle", () => {
     await completeOnboarding(pm.actor, project.id, "approve_scope", "");
     expect(await prisma.onboardingItem.findFirstOrThrow({ where: { projectId: project.id, templateKey: "approve_scope" } })).toMatchObject({ done: true });
     expect(await prisma.srsArtifact.count({ where: { versionId: versionId! } })).toBe(2);
-    await expect(prisma.$executeRawUnsafe(`UPDATE "SrsVersion" SET "snapshot" = '{}' WHERE "id" = ?`, versionId)).rejects.toThrow(/immutable/);
-    await expect(prisma.$executeRawUnsafe(`UPDATE "SrsSignature" SET "decision" = 'rejected' WHERE "versionId" = ?`, versionId)).rejects.toThrow(/immutable/);
-    await expect(prisma.$executeRawUnsafe(`DELETE FROM "SrsVersion" WHERE "id" = ?`, versionId)).rejects.toThrow(/never deleted/);
-    await expect(prisma.$executeRawUnsafe(`UPDATE "SrsVersion" SET "status" = 'draft' WHERE "id" = ?`, versionId)).rejects.toThrow(/superseded/);
-    await expect(prisma.$executeRawUnsafe(`UPDATE "SrsSection" SET "content" = 'x' WHERE "documentId" = ?`, doc.id)).rejects.toThrow(/locked/);
+    await expect(prisma.$executeRawUnsafe(`UPDATE "SrsVersion" SET "snapshot" = '{}' WHERE "id" = $1`, versionId)).rejects.toThrow(/immutable/);
+    await expect(prisma.$executeRawUnsafe(`UPDATE "SrsSignature" SET "decision" = 'rejected' WHERE "versionId" = $1`, versionId)).rejects.toThrow(/immutable/);
+    await expect(prisma.$executeRawUnsafe(`DELETE FROM "SrsVersion" WHERE "id" = $1`, versionId)).rejects.toThrow(/never deleted/);
+    await expect(prisma.$executeRawUnsafe(`UPDATE "SrsVersion" SET "status" = 'draft' WHERE "id" = $1`, versionId)).rejects.toThrow(/superseded/);
+    await expect(prisma.$executeRawUnsafe(`UPDATE "SrsSection" SET "content" = 'x' WHERE "documentId" = $1`, doc.id)).rejects.toThrow(/locked/);
 
     const pdf = await downloadSrs(client.actor, doc.id, { ref: "approved", format: "pdf" });
     expect(pdf.bytes.subarray(0, 4).toString()).toBe("%PDF");
@@ -255,7 +249,7 @@ describe("SRS approval lifecycle", () => {
     const old = await downloadSrs(client.actor, doc.id, { ref: versionId!, format: "pdf" });
     expect(old.fileName).toMatch(/v1\.0\.pdf$/);
     expect(project.id).toBeTruthy();
-  }, 60_000);
+  });
 
   it("records exactly one approval when signers sign at the same time, and refuses inactive signers", async () => {
     const { pm, client, doc } = await setup();
@@ -281,7 +275,7 @@ describe("SRS approval lifecycle", () => {
     expect(await prisma.auditLog.count({ where: { action: "srs.approved", entityId: doc.id } })).toBe(1);
     const notices = await prisma.notification.findMany({ where: { userId: client.user.id, title: { startsWith: "SRS approved" } } });
     expect(notices.length).toBeLessThanOrEqual(1);
-  }, 60_000);
+  });
 
   it("enforces the delivery gate on unverified mandatory requirements", async () => {
     const { pm, project, doc } = await setup();

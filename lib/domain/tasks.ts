@@ -17,7 +17,7 @@ import {
 import { OPEN_TASK, TASK_TRANSITIONS, canTransition } from "@/lib/domain/workflow";
 import { isPastDate } from "@/lib/dates";
 import { conflict, validationError } from "@/lib/errors";
-import { cleanText, searchBlob } from "@/lib/text";
+import { cleanText, searchBlob, textMatch } from "@/lib/text";
 
 const PAGE = 30;
 
@@ -31,7 +31,7 @@ export async function listTasks(actor: Actor, query: { page?: number; q?: string
     ...(query.status ? { status: query.status } : {}),
     ...(query.assigneeId ? { assigneeId: query.assigneeId } : {}),
     ...(query.projectId ? { projectId: query.projectId } : {}),
-    ...(q ? { searchText: { contains: q } } : {}),
+    ...(q ? { searchText: textMatch(q) } : {}),
   };
   const [total, rows] = await prisma.$transaction([
     prisma.task.count({ where }),

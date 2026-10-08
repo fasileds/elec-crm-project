@@ -1,6 +1,7 @@
 import { execSync } from "node:child_process";
 
 export default function setup() {
-  process.env.DATABASE_URL = "file:./test.db?connection_limit=1";
-  execSync("npx prisma migrate deploy", { stdio: "inherit", env: { ...process.env, DATABASE_URL: "file:./test.db?connection_limit=1" } });
+  const url = process.env.TEST_DATABASE_URL;
+  if (!url || !/[?&]schema=(?!public\b)\w+/.test(url)) throw new Error("TEST_DATABASE_URL must select a dedicated schema, for example ?schema=vitest.");
+  execSync("npx prisma migrate deploy", { stdio: "inherit", env: { ...process.env, DATABASE_URL: url, DIRECT_URL: url } });
 }

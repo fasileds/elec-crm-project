@@ -16,7 +16,7 @@ import {
 import { DEFAULT_PHASES, OPEN_CHANGE, OPEN_TASK, PROJECT_TRANSITIONS, canTransition } from "@/lib/domain/workflow";
 import { isPastDate, todayInTimeZone, daysUntil } from "@/lib/dates";
 import { conflict, validationError } from "@/lib/errors";
-import { cleanText, searchBlob } from "@/lib/text";
+import { cleanText, searchBlob, textMatch } from "@/lib/text";
 import { createSrsDraft } from "@/lib/domain/srs/core";
 import { PROJECT_TYPES } from "@/lib/domain/srs/catalog";
 import { srsDeliveryGate } from "@/lib/domain/srs/workflow";
@@ -32,7 +32,7 @@ export async function listProjects(actor: Actor, query: { page?: number; q?: str
     ...(query.status ? { status: query.status } : { archivedAt: null }),
     ...(query.customerId ? { customerId: query.customerId } : {}),
     ...(query.health ? { healthStatus: query.health } : {}),
-    ...(q ? { searchText: { contains: q } } : {}),
+    ...(q ? { searchText: textMatch(q) } : {}),
   };
   if (query.status === "archived") delete (where as { archivedAt?: null }).archivedAt;
   const [total, items] = await prisma.$transaction([

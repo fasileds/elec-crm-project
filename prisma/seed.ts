@@ -5,14 +5,20 @@ import type { Actor } from "../lib/actor";
 import { createSrsDraft, updateSrsSettings } from "../lib/domain/srs/core";
 import { addCriterion, createItem, generateFromAnswers, saveAnswer } from "../lib/domain/srs/content";
 import { addSrsComment, transitionSrs } from "../lib/domain/srs/workflow";
+import { ensureBucket } from "../lib/storage";
 
-const prisma = new PrismaClient();
+try {
+  process.loadEnvFile(".env");
+} catch {}
+
+const prisma = new PrismaClient({ transactionOptions: { maxWait: 10_000, timeout: 60_000 } });
 const PASSWORD = "Harbor!2026";
 
 async function main() {
   if (process.env.NODE_ENV === "production" && process.env.SEED_ALLOW !== "1") {
     throw new Error("Refusing to seed production. Set SEED_ALLOW=1 to override.");
   }
+  if (await ensureBucket()) console.info(`Storage bucket ready: ${process.env.SUPABASE_STORAGE_BUCKET || "elec-files"}`);
   const existing = await prisma.organization.findUnique({ where: { slug: "elec" } });
   if (existing) {
     await backfillSrs(existing.id);

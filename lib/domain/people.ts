@@ -1,5 +1,6 @@
 import bcrypt from "bcryptjs";
 import { prisma } from "@/lib/db";
+import { textMatch } from "@/lib/text";
 import type { Actor } from "@/lib/actor";
 import { requireEmployee, requirePermission, requireRecentAuth } from "@/lib/actor";
 import { revokeUserSessions } from "@/lib/domain/auth";
@@ -14,7 +15,7 @@ export async function listPeople(actor: Actor, query: { q?: string; status?: str
       organizationId: actor.organizationId,
       kind: "employee",
       ...(query.status ? { status: query.status } : {}),
-      ...(q ? { OR: [{ name: { contains: q } }, { email: { contains: q } }] } : {}),
+      ...(q ? { OR: [{ name: textMatch(q) }, { email: textMatch(q) }] } : {}),
     },
     orderBy: { name: "asc" },
     select: {

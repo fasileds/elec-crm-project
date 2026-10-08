@@ -2,6 +2,7 @@ import bcrypt from "bcryptjs";
 import { afterAll, beforeEach, describe, expect, it } from "vitest";
 import type { Actor } from "@/lib/actor";
 import { prisma } from "@/lib/db";
+import { resetDatabase } from "./reset";
 import { provisionOrganization } from "@/lib/domain/bootstrap";
 import { loginWithPassword, resetPassword } from "@/lib/domain/auth";
 import { getProject, createProject } from "@/lib/domain/projects";
@@ -12,13 +13,6 @@ import { newSecret } from "@/lib/domain/support";
 import { AppError } from "@/lib/errors";
 import { POST as webhook } from "@/app/api/webhooks/resend/route";
 import { createHmac } from "node:crypto";
-
-async function resetDatabase() {
-  const tables = await prisma.$queryRawUnsafe<Array<{ name: string }>>("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' AND name NOT LIKE '_prisma_%'");
-  await prisma.$executeRawUnsafe("PRAGMA foreign_keys = OFF");
-  for (const table of tables) await prisma.$executeRawUnsafe(`DELETE FROM "${table.name}"`);
-  await prisma.$executeRawUnsafe("PRAGMA foreign_keys = ON");
-}
 
 async function makeActor(roleKey: string, slug: string, kind: Actor["kind"] = "employee", customerId: string | null = null) {
   const org = await prisma.organization.findUniqueOrThrow({ where: { slug } });

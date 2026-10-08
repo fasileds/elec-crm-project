@@ -1,16 +1,13 @@
 import { createHash, randomBytes } from "node:crypto";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
-import path from "node:path";
 import { prisma } from "@/lib/db";
 import type { Actor } from "@/lib/actor";
 import { requirePermission } from "@/lib/actor";
 import { loadProject } from "@/lib/domain/access";
 import { notifyUser, scheduleOutbox, writeActivity, writeAudit } from "@/lib/domain/support";
 import { detectUpload } from "@/lib/files/sniff";
-import { conflict, forbidden, notFound, validationError } from "@/lib/errors";
+import { conflict, notFound, validationError } from "@/lib/errors";
+import { getObject, putObject } from "@/lib/storage";
 import { safeFileName } from "@/lib/text";
-
-const ROOT = path.join(process.cwd(), "storage");
 
 export async function saveDocument(
   actor: Actor,
@@ -37,11 +34,8 @@ export async function saveDocument(
   const fileName = safeFileName(input.fileName);
   const sniffed = detectUpload(fileName, input.bytes);
   if (!sniffed.ok) throw validationError(sniffed.message);
-  const storageKey = path.posix.join(actor.organizationId, randomBytes(16).toString("hex"));
-  const absolute = path.resolve(ROOT, storageKey);
-  if (!absolute.startsWith(path.resolve(ROOT))) throw forbidden("Invalid storage path.");
-  await mkdir(path.dirname(absolute), { recursive: true });
-  await writeFile(absolute, input.bytes);
+  const storageKey = `${actor.organizationId}/${randomBytes(16).toString("hex")}`;
+  await putObject(storageKey, input.bytes, sniffed.mediaType);
   const previous = input.rootDocumentId
     ? await prisma.document.findFirst({ where: { id: input.rootDocumentId, organizationId: actor.organizationId } })
     : null;
@@ -93,9 +87,7 @@ export async function readDocument(actor: Actor, id: string) {
   }
   if (document.projectId) await loadProject(prisma, actor, document.projectId);
   else requirePermission(actor, "documents.view");
-  const absolute = path.resolve(ROOT, document.storageKey);
-  if (!absolute.startsWith(path.resolve(ROOT))) throw forbidden("Invalid storage path.");
-  const bytes = await readFile(absolute);
+  const bytes = await getObject(document.storageKey);
   return { fileName: document.fileName, mediaType: document.mediaType, bytes };
 }
 

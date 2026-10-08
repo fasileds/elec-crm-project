@@ -21,6 +21,11 @@ export function searchBlob(parts: Array<string | null | undefined>) {
   return normalizeSearch(parts.filter(Boolean).join(" "));
 }
 
+/** Case-insensitive substring filter (Postgres `contains` is case-sensitive by default). */
+export function textMatch(value: string) {
+  return { contains: value, mode: "insensitive" as const };
+}
+
 const SENSITIVE = /password|token|secret|api[_-]?key|authorization|cookie|hash/i;
 
 export function redact(value: unknown): unknown {

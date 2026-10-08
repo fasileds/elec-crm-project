@@ -8,7 +8,7 @@ import { startProjectFromOpportunity } from "@/lib/domain/projects";
 import { appUrl, nextCode, notifyUser, rememberIdempotency, replayOrClaim, scheduleOutbox, writeActivity, writeAudit } from "@/lib/domain/support";
 import { OPPORTUNITY_TRANSITIONS, STAGE_PROBABILITY, canTransition } from "@/lib/domain/workflow";
 import { AppError, conflict, forbidden, notFound, validationError } from "@/lib/errors";
-import { cleanText, searchBlob } from "@/lib/text";
+import { cleanText, searchBlob, textMatch } from "@/lib/text";
 
 const OPEN_LEAD = ["new", "contacted", "working", "qualified", "nurturing", "dormant"];
 const CLOSED_LEAD = ["converted", "lost", "archived", "unqualified"];
@@ -52,7 +52,7 @@ export async function listLeads(actor: Actor, query: LeadQuery) {
       query.source ? { source: query.source } : {},
       query.priority ? { priority: query.priority } : {},
       query.campaignId ? { campaignId: query.campaignId } : {},
-      q ? { searchText: { contains: q } } : {},
+      q ? { searchText: textMatch(q) } : {},
     ],
   };
   const [total, items, queues] = await Promise.all([
@@ -435,7 +435,7 @@ export async function listOpportunities(actor: Actor, query: { q?: string; stage
     archivedAt: null,
     ...(can(actor, "reports.view") || can(actor, "leads.assign") ? {} : { ownerId: actor.userId }),
     ...(query.stage ? { stage: query.stage } : query.open ? { stage: { notIn: ["won", "lost"] } } : {}),
-    ...(q ? { searchText: { contains: q } } : {}),
+    ...(q ? { searchText: textMatch(q) } : {}),
   };
   const [total, items] = await Promise.all([
     prisma.opportunity.count({ where }),
