@@ -159,27 +159,28 @@ export async function provisionOrganization(
   return organization;
 }
 
-let rolesSynced = false;
+let rolesReady: Promise<void> | null = null;
 
-export async function ensureRoleTemplates() {
-  if (rolesSynced) return;
+/** Fills in permissions added to a role template after the organization was created. One read and at most one write. */
+export function ensureRoleTemplates() {
+  rolesReady ??= syncRoleTemplates().catch((error: unknown) => {
+    rolesReady = null;
+    throw error;
+  });
+  return rolesReady;
+}
+
+async function syncRoleTemplates() {
   const { prisma } = await import("@/lib/db");
-  const organizations = await prisma.organization.findMany({ select: { id: true } });
-  for (const organization of organizations) {
-    for (const [key, template] of Object.entries(ROLE_TEMPLATES)) {
-      const role = await prisma.role.findUnique({ where: { organizationId_key: { organizationId: organization.id, key } } });
-      if (!role) continue;
-      for (const permission of template.permissions) {
-        await prisma.rolePermission.upsert({
-          where: { roleId_permission: { roleId: role.id, permission } },
-          create: { roleId: role.id, permission },
-          update: {},
-        });
-      }
-    }
-    await syncSequences(prisma, organization.id);
+  const roles = await prisma.role.findMany({ where: { system: true }, select: { id: true, key: true, permissions: { select: { permission: true } } } });
+  const missing: { roleId: string; permission: string }[] = [];
+  for (const role of roles) {
+    const template = ROLE_TEMPLATES[role.key];
+    if (!template) continue;
+    const held = new Set(role.permissions.map((item) => item.permission));
+    for (const permission of template.permissions) if (!held.has(permission)) missing.push({ roleId: role.id, permission });
   }
-  rolesSynced = true;
+  if (missing.length) await prisma.rolePermission.createMany({ data: missing, skipDuplicates: true });
 }
 
 function highest(codes: Array<{ code: string }>) {

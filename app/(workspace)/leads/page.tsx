@@ -24,8 +24,8 @@ export default async function LeadsPage({ searchParams }: { searchParams: Promis
   const actor = await requireEmployee();
   const query = await searchParams;
   const manager = can(actor, "leads.assign");
-  const result = await listLeads(actor, { q: query.q, status: query.status, view: query.view, priority: query.priority, source: query.source, ownerId: manager ? query.ownerId : undefined, page: Number(query.page ?? 1) });
-  const [people, teams, quality, breaches, workload, campaigns] = await Promise.all([
+  const [result, people, teams, quality, breaches, workload, campaigns] = await Promise.all([
+    listLeads(actor, { q: query.q, status: query.status, view: query.view, priority: query.priority, source: query.source, ownerId: manager ? query.ownerId : undefined, page: Number(query.page ?? 1) }),
     manager ? listAssignableEmployees(actor) : Promise.resolve([]),
     manager ? listCrmTeams(actor) : Promise.resolve([]),
     manager ? dataQuality(actor) : Promise.resolve(null),

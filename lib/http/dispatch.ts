@@ -10,16 +10,11 @@ import { listDocuments, saveDocument } from "@/lib/domain/documents";
 import { correctTime, listTime, logTime, setTimeStatus } from "@/lib/domain/time";
 import { listPeople, updateEmployee, workload } from "@/lib/domain/people";
 import { dashboard, exportRows, listAudit, listEmails, listLookups, listNotifications, markAllNotificationsRead, markNotificationRead, portalHome, searchAll, updateLookup, updatePreference } from "@/lib/domain/insights";
-import { SESSION_COOKIE } from "@/lib/session";
+import { readCookie, SESSION_COOKIE } from "@/lib/cookies";
 import { log } from "@/lib/log";
 
 type Ctx = { req: Request; actor: NonNullable<Awaited<ReturnType<typeof actorFromToken>>> | null; parts: string[]; url: URL; requestId: string };
 
-function cookie(req: Request, name: string) {
-  const raw = req.headers.get("cookie") ?? "";
-  const found = raw.split(";").map((part) => part.trim()).find((part) => part.startsWith(`${name}=`));
-  return found ? decodeURIComponent(found.slice(name.length + 1)) : undefined;
-}
 
 function assertOrigin(req: Request) {
   const origin = req.headers.get("origin");
@@ -52,7 +47,7 @@ export async function dispatch(req: Request, parts: string[]) {
   const requestId = req.headers.get("x-request-id") ?? crypto.randomUUID();
   try {
     if (req.method !== "GET" && req.method !== "HEAD") assertOrigin(req);
-    const actor = await actorFromToken(cookie(req, SESSION_COOKIE));
+    const actor = await actorFromToken(readCookie(req.headers.get("cookie"), SESSION_COOKIE));
     const ctx: Ctx = { req, actor, parts, url: new URL(req.url), requestId };
     const key = routeKey(req.method, parts);
     const data = await handle(key, ctx);
@@ -353,7 +348,3 @@ async function handle(key: string, ctx: Ctx): Promise<unknown> {
   throw new AppError("NOT_FOUND", "That API route does not exist.", 404);
 }
 
-export function loginCookieHeader(token: string) {
-  const secure = process.env.NODE_ENV === "production" ? "; Secure" : "";
-  return `${SESSION_COOKIE}=${encodeURIComponent(token)}; HttpOnly; SameSite=Lax; Path=/; Max-Age=${60 * 60 * 12}${secure}`;
-}

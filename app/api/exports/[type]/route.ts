@@ -1,15 +1,13 @@
 import { actorFromToken } from "@/lib/domain/auth";
 import { exportRows } from "@/lib/domain/insights";
 import { AppError } from "@/lib/errors";
-import { SESSION_COOKIE } from "@/lib/session";
+import { readCookie, SESSION_COOKIE } from "@/lib/cookies";
 
 export const runtime = "nodejs";
 
 export async function GET(req: Request, context: { params: Promise<{ type: string }> }) {
   const { type } = await context.params;
-  const raw = req.headers.get("cookie") ?? "";
-  const found = raw.split(";").map((part) => part.trim()).find((part) => part.startsWith(`${SESSION_COOKIE}=`));
-  const token = found ? decodeURIComponent(found.slice(SESSION_COOKIE.length + 1)) : undefined;
+  const token = readCookie(req.headers.get("cookie"), SESSION_COOKIE);
   const actor = await actorFromToken(token);
   if (!actor) return Response.json({ error: { message: "Sign in to continue." } }, { status: 401 });
   if (type !== "customers" && type !== "projects" && type !== "tasks" && type !== "time") {

@@ -5,7 +5,7 @@ import { redirect } from "next/navigation";
 import { revalidatePath } from "next/cache";
 import { AppError } from "@/lib/errors";
 import { parseMoneyToCents } from "@/lib/money";
-import { sessionCookie } from "@/lib/session";
+import { SESSION_COOKIE, sessionCookieOptions } from "@/lib/cookies";
 import { requireCustomer, requireEmployee, requireUser } from "@/lib/session";
 import { loginWithPassword, logout, requestPasswordReset, resetPassword, acceptInvitation } from "@/lib/domain/auth";
 import { addContact, archiveCustomer, createCustomer } from "@/lib/domain/customers";
@@ -28,9 +28,8 @@ function failure(error: unknown): ActionState {
 export async function loginAction(_prev: ActionState, formData: FormData): Promise<ActionState> {
   try {
     const result = await loginWithPassword({ email: String(formData.get("email") ?? ""), password: String(formData.get("password") ?? "") });
-    const cookie = sessionCookie(result.token);
     const jar = await cookies();
-    jar.set(cookie.name, cookie.value, cookie.options);
+    jar.set(SESSION_COOKIE, result.token, sessionCookieOptions());
     redirect(result.actor.kind === "customer" ? "/portal" : "/dashboard");
   } catch (error) {
     return failure(error);
@@ -41,7 +40,7 @@ export async function logoutAction() {
   const actor = await requireUser();
   await logout(actor.sessionId);
   const jar = await cookies();
-  jar.delete(sessionCookie("").name);
+  jar.set(SESSION_COOKIE, "", sessionCookieOptions(0));
   redirect("/login");
 }
 

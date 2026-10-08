@@ -35,7 +35,7 @@ export async function listProjects(actor: Actor, query: { page?: number; q?: str
     ...(q ? { searchText: textMatch(q) } : {}),
   };
   if (query.status === "archived") delete (where as { archivedAt?: null }).archivedAt;
-  const [total, items] = await prisma.$transaction([
+  const [total, items] = await Promise.all([
     prisma.project.count({ where }),
     prisma.project.findMany({
       where,
@@ -53,12 +53,10 @@ export async function listProjects(actor: Actor, query: { page?: number; q?: str
 
 export async function getProject(actor: Actor, id: string) {
   const project = await loadProject(prisma, actor, id);
-  const [customer, manager] = await Promise.all([
+  const customerView = actor.kind === "customer";
+  const [customer, manager, members, contacts, phases, milestones, requirements, tasks, changes, issues, onboarding, activities, decisions, meetings] = await Promise.all([
     prisma.customer.findUnique({ where: { id: project.customerId }, select: { id: true, name: true, code: true } }),
     project.managerId ? prisma.user.findUnique({ where: { id: project.managerId }, select: { id: true, name: true, status: true } }) : Promise.resolve(null),
-  ]);
-  const customerView = actor.kind === "customer";
-  const [members, contacts, phases, milestones, requirements, tasks, changes, issues, onboarding, activities, decisions, meetings] = await Promise.all([
     prisma.projectMember.findMany({ where: { projectId: id }, include: { user: { select: { id: true, name: true, email: true, status: true, jobTitle: true } } } }),
     prisma.projectContact.findMany({ where: { projectId: id }, include: { contact: true } }),
     prisma.phase.findMany({ where: { projectId: id }, orderBy: { sort: "asc" } }),

@@ -47,7 +47,7 @@ export async function listCustomers(actor: Actor, query: { page?: number; q?: st
     ...(query.tag ? { tags: { some: { tag: { name: query.tag } } } } : {}),
     ...(q ? { searchText: textMatch(q) } : {}),
   };
-  const [total, rows] = await prisma.$transaction([
+  const [total, rows] = await Promise.all([
     prisma.customer.count({ where }),
     prisma.customer.findMany({
       where,
@@ -67,10 +67,8 @@ export async function listCustomers(actor: Actor, query: { page?: number; q?: st
 
 export async function getCustomer(actor: Actor, id: string) {
   const customer = await loadCustomer(prisma, actor, id);
-  const manager = customer.accountManagerId
-    ? await prisma.user.findUnique({ where: { id: customer.accountManagerId }, select: { id: true, name: true, status: true } })
-    : null;
-  const [contacts, addresses, projects, activities, tags] = await Promise.all([
+  const [manager, contacts, addresses, projects, activities, tags] = await Promise.all([
+    customer.accountManagerId ? prisma.user.findUnique({ where: { id: customer.accountManagerId }, select: { id: true, name: true, status: true } }) : Promise.resolve(null),
     prisma.contact.findMany({ where: { customerId: id, archivedAt: null }, orderBy: [{ isPrimary: "desc" }, { name: "asc" }] }),
     prisma.address.findMany({ where: { customerId: id } }),
     prisma.project.findMany({

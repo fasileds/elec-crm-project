@@ -3,22 +3,9 @@ import { cookies } from "next/headers";
 import { redirect } from "next/navigation";
 import { actorFromToken } from "@/lib/domain/auth";
 import type { Actor } from "@/lib/actor";
+import { SESSION_COOKIE } from "@/lib/cookies";
 
-export const SESSION_COOKIE = "elec_session";
-
-export function sessionCookie(token: string) {
-  return {
-    name: SESSION_COOKIE,
-    value: token,
-    options: {
-      httpOnly: true,
-      sameSite: "lax" as const,
-      secure: process.env.NODE_ENV === "production",
-      path: "/",
-      maxAge: 60 * 60 * 12,
-    },
-  };
-}
+export { SESSION_COOKIE };
 
 export async function currentActor(): Promise<Actor | null> {
   const jar = await cookies();

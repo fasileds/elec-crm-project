@@ -2,9 +2,9 @@ import bcrypt from "bcryptjs";
 import { prisma } from "@/lib/db";
 import type { Actor } from "@/lib/actor";
 import { conflict, forbidden, rateLimited, unauthorized, validationError } from "@/lib/errors";
+import { SESSION_ABSOLUTE_MS, SESSION_IDLE_MS } from "@/lib/cookies";
 import { appUrl, hashSecret, newSecret, notifyUser, scheduleOutbox, writeAudit } from "@/lib/domain/support";
 
-const SESSION_MS = 12 * 60 * 60 * 1000;
 const RESET_MS = 60 * 60 * 1000;
 const VERIFY_MS = 24 * 60 * 60 * 1000;
 const INVITE_MS = 7 * 24 * 60 * 60 * 1000;
@@ -75,7 +75,7 @@ export async function loginWithPassword(input: { email: string; password: string
     data: {
       userId: user.id,
       tokenHash: secret.hash,
-      expiresAt: new Date(Date.now() + SESSION_MS),
+      expiresAt: new Date(Date.now() + SESSION_IDLE_MS),
       userAgent: input.userAgent?.slice(0, 240),
       ip: input.ip?.slice(0, 64),
       lastAuthenticatedAt: new Date(),
@@ -97,11 +97,11 @@ export async function actorFromToken(token: string | undefined | null) {
   const user = session.user;
   if (user.status !== "active" || user.deactivatedAt) return null;
   if (user.kind === "customer" && user.customer?.archivedAt) return null;
-  const maxAge = session.createdAt.getTime() + 7 * 24 * 60 * 60 * 1000;
-  if (session.expiresAt.getTime() - Date.now() < 2 * 60 * 60 * 1000 && Date.now() < maxAge) {
+  const absoluteEnd = session.createdAt.getTime() + SESSION_ABSOLUTE_MS;
+  if (session.expiresAt.getTime() - Date.now() < 2 * 60 * 60 * 1000 && Date.now() < absoluteEnd) {
     await prisma.session.update({
       where: { id: session.id },
-      data: { expiresAt: new Date(Math.min(Date.now() + SESSION_MS, maxAge)) },
+      data: { expiresAt: new Date(Math.min(Date.now() + SESSION_IDLE_MS, absoluteEnd)) },
     });
   }
   return toActor(user, session.id, session.lastAuthenticatedAt);

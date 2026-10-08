@@ -60,9 +60,11 @@ async function snapshot(
   documentId: string,
   input: { kind: "review" | "candidate"; status: string; label: string; clientVisible: boolean; note: string; changeRequestId?: string | null },
 ) {
-  const inputs = await loadDocInputs(db, documentId);
+  const [inputs, last] = await Promise.all([
+    loadDocInputs(db, documentId),
+    db.srsVersion.findFirst({ where: { documentId }, orderBy: { seq: "desc" } }),
+  ]);
   const model = buildDocModel(inputs, { versionLabel: input.label, status: input.status === "in_approval" ? "approval_pending" : input.kind === "review" ? "client_review" : inputs.doc.status });
-  const last = await db.srsVersion.findFirst({ where: { documentId }, orderBy: { seq: "desc" } });
   return db.srsVersion.create({
     data: {
       documentId,
@@ -92,11 +94,11 @@ export async function transitionSrs(actor: Actor, documentId: string, to: string
   assertNoSecrets(note);
   if (to === "changes_requested" && note.length < 5) throw validationError("Describe the changes you need.", { note: "Describe the changes." });
   if (to === "client_review" && !doc.clientAccess) throw validationError("Turn on client access before sending the SRS for client review.");
-  const config = (await loadDocInputs(prisma, documentId)).config;
   if (to === "approval_pending") {
-    const check = completeness(await loadDocInputs(prisma, documentId));
+    const inputs = await loadDocInputs(prisma, documentId);
+    const check = completeness(inputs);
     if (check.blockers.length) throw validationError(`Resolve ${check.blockers.length} blocker${check.blockers.length === 1 ? "" : "s"} before requesting approval: ${check.blockers.slice(0, 3).map((b) => b.message).join(" ")}`);
-    if (config.approval.clientSigners > 0 && !doc.clientAccess) throw validationError("This template needs client signatures. Turn on client access first.");
+    if (inputs.config.approval.clientSigners > 0 && !doc.clientAccess) throw validationError("This template needs client signatures. Turn on client access first.");
     const open = await prisma.srsComment.count({ where: { documentId, kind: "clarification", status: { in: ["open", "answered"] }, parentId: null } });
     if (open) throw validationError(`Resolve ${open} open clarification${open === 1 ? "" : "s"} before requesting approval.`);
   }
@@ -492,10 +494,10 @@ export async function resolveSrsComment(actor: Actor, commentId: string) {
 
 export async function getSrsWorkspace(actor: Actor, documentId: string) {
   const { doc, project } = await loadSrs(prisma, actor, documentId);
-  const inputs = await loadDocInputs(prisma, documentId);
   const internal = canSeeInternal(actor);
   const customer = actor.kind === "customer";
-  const [items, comments, versions, signatures, changes, tasks, milestones, documents, artifacts] = await Promise.all([
+  const [inputs, items, comments, versions, signatures, changes, tasks, milestones, documents, artifacts, team] = await Promise.all([
+    loadDocInputs(prisma, documentId),
     prisma.srsItem.findMany({ where: { documentId, ...visibilityWhere(actor) }, include: { criteria: { orderBy: { sort: "asc" } }, links: true, revisions: { orderBy: { revision: "desc" }, take: 20 } }, orderBy: [{ kind: "asc" }, { seq: "asc" }] }),
     prisma.srsComment.findMany({ where: { documentId, ...visibilityWhere(actor) }, orderBy: { createdAt: "asc" } }),
     prisma.srsVersion.findMany({ where: { documentId, ...(customer ? { clientVisible: true } : {}) }, orderBy: { seq: "desc" }, select: { id: true, seq: true, label: true, kind: true, status: true, hash: true, note: true, clientVisible: true, publishedAt: true, createdByName: true, createdAt: true, approvedAt: true, supersededAt: true, changeRequestId: true } }),
@@ -505,11 +507,11 @@ export async function getSrsWorkspace(actor: Actor, documentId: string) {
     customer ? Promise.resolve([]) : prisma.milestone.findMany({ where: { projectId: project.id }, select: { id: true, code: true, name: true, status: true, dueOn: true }, orderBy: { code: "asc" } }),
     prisma.document.findMany({ where: { projectId: project.id, archivedAt: null, ...(customer ? { visibility: "customer" } : {}) }, select: { id: true, fileName: true, visibility: true }, orderBy: { createdAt: "desc" }, take: 100 }),
     prisma.srsArtifact.findMany({ where: { documentId }, select: { versionId: true, format: true, sha256: true, byteSize: true, createdAt: true } }),
+    customer ? Promise.resolve([]) : prisma.user.findMany({ where: { organizationId: actor.organizationId, kind: "employee", status: "active" }, select: { id: true, name: true }, orderBy: { name: "asc" } }),
   ]);
   const visibleSignatures = customer ? signatures.filter((s) => versions.some((v) => v.id === s.versionId)) : signatures;
   const check = completeness(inputs);
   const sections = inputs.sections.filter((s) => internal || s.visibility === "shared");
-  const team = customer ? [] : await prisma.user.findMany({ where: { organizationId: actor.organizationId, kind: "employee", status: "active" }, select: { id: true, name: true }, orderBy: { name: "asc" } });
   return {
     doc,
     project,

@@ -24,7 +24,7 @@ export async function dashboard(actor: Actor, rangeDays = 30) {
   const seeFinance = can(actor, "finance.view");
   const seeCustomers = can(actor, "customers.view");
 
-  const [projects, tasks, leads, approvalCount, approvalRows, activities, messageCount, messages, reminders, milestones, issues, changes, taskMix, notifications, inactiveCustomers, newLeads, budgets, workloadGroups, layoutRow] = await Promise.all([
+  const [projects, tasks, leads, approvalCount, approvalRows, activities, messageCount, messages, reminders, milestones, issues, changes, taskMix, notifications, inactiveCustomers, newLeads, budgets, workloadGroups, layoutRow, pipeline] = await Promise.all([
     prisma.project.findMany({
       where: projectWhere,
       select: { id: true, name: true, code: true, status: true, healthStatus: true, healthScore: true, healthReasons: true, dueOn: true, budgetCents: true, customer: { select: { id: true, name: true } } },
@@ -99,11 +99,9 @@ export async function dashboard(actor: Actor, rangeDays = 30) {
       orderBy: { createdAt: "desc" },
       select: { query: true },
     }),
+    seePipeline ? prisma.lead.groupBy({ by: ["status"], where: { organizationId: actor.organizationId, archivedAt: null }, _count: { _all: true } }) : Promise.resolve([]),
   ]);
 
-  const pipeline = seePipeline
-    ? await prisma.lead.groupBy({ by: ["status"], where: { organizationId: actor.organizationId, archivedAt: null }, _count: { _all: true } })
-    : [];
   const assigneeIds = workloadGroups.map((row) => row.assigneeId).filter((id): id is string => Boolean(id));
   const assignees = assigneeIds.length
     ? await prisma.user.findMany({ where: { organizationId: actor.organizationId, id: { in: assigneeIds } }, select: { id: true, name: true, status: true } })
@@ -414,7 +412,7 @@ export async function updateLookup(actor: Actor, id: string, input: { label?: st
 export async function listAudit(actor: Actor, page = 1) {
   requirePermission(actor, "audit.view");
   const where = { organizationId: actor.organizationId };
-  const [total, items] = await prisma.$transaction([
+  const [total, items] = await Promise.all([
     prisma.auditLog.count({ where }),
     prisma.auditLog.findMany({ where, orderBy: { createdAt: "desc" }, skip: (page - 1) * 40, take: 40 }),
   ]);

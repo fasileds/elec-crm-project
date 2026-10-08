@@ -33,7 +33,7 @@ export async function listTasks(actor: Actor, query: { page?: number; q?: string
     ...(query.projectId ? { projectId: query.projectId } : {}),
     ...(q ? { searchText: textMatch(q) } : {}),
   };
-  const [total, rows] = await prisma.$transaction([
+  const [total, rows] = await Promise.all([
     prisma.task.count({ where }),
     prisma.task.findMany({
       where,

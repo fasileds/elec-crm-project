@@ -1,11 +1,12 @@
 import { NextResponse, type NextRequest } from "next/server";
+import { SESSION_COOKIE } from "@/lib/cookies";
 
 const PUBLIC = [/^\/login$/, /^\/forgot-password$/, /^\/reset-password$/, /^\/invite$/, /^\/verify-email$/, /^\/api\/webhooks\//, /^\/api\/v1\/auth\/(login|forgot-password|reset-password|verify-email|accept-invite)$/];
 
 export function proxy(request: NextRequest) {
   const { pathname } = request.nextUrl;
   if (pathname.startsWith("/_next") || pathname.startsWith("/favicon") || pathname.includes(".")) return NextResponse.next();
-  const session = request.cookies.get("elec_session")?.value;
+  const session = request.cookies.get(SESSION_COOKIE)?.value;
   const isPublic = PUBLIC.some((pattern) => pattern.test(pathname)) || pathname === "/";
   if (!session && !isPublic && (pathname.startsWith("/api") || pathname.startsWith("/portal") || isApp(pathname))) {
     if (pathname.startsWith("/api")) return NextResponse.json({ error: { message: "Sign in to continue." } }, { status: 401 });

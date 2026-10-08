@@ -1,7 +1,7 @@
+import { Prisma } from "@prisma/client";
 import { prisma } from "@/lib/db";
 import type { Actor } from "@/lib/actor";
 import { can, requirePermission } from "@/lib/actor";
-import { ensureRoleTemplates } from "@/lib/domain/bootstrap";
 import { explainScore, type ScoreRule } from "@/lib/domain/crm-score";
 import { addContact, createCustomer } from "@/lib/domain/customers";
 import { startProjectFromOpportunity } from "@/lib/domain/projects";
@@ -38,8 +38,6 @@ export type LeadQuery = {
 
 export async function listLeads(actor: Actor, query: LeadQuery) {
   requirePermission(actor, "leads.view");
-  await ensureRoleTemplates();
-  await ensureCrmDefaults(actor.organizationId);
   const page = Math.max(1, query.page ?? 1);
   const q = query.q?.trim().toLowerCase();
   const where = {
@@ -55,7 +53,8 @@ export async function listLeads(actor: Actor, query: LeadQuery) {
       q ? { searchText: textMatch(q) } : {},
     ],
   };
-  const [total, items, queues] = await Promise.all([
+  const [, total, items, queues] = await Promise.all([
+    ensureCrmDefaults(actor.organizationId),
     prisma.lead.count({ where }),
     prisma.lead.findMany({
       where,
@@ -94,14 +93,17 @@ export async function getLead(actor: Actor, id: string) {
     },
   });
   if (!lead) throw notFound("Lead not found.");
-  const duplicates = await findLeadDuplicates(actor, { email: lead.email, phone: lead.phone, domain: lead.domain, excludeId: lead.id });
-  const timeline = await prisma.activity.findMany({
-    where: { organizationId: actor.organizationId, entityType: "lead", entityId: id },
-    orderBy: { createdAt: "desc" },
-    take: 30,
-  });
   const userIds = [...new Set(lead.assignments.flatMap((entry) => [entry.fromUserId, entry.toUserId]).filter((value): value is string => Boolean(value)))];
-  const names = new Map((userIds.length ? await prisma.user.findMany({ where: { id: { in: userIds }, organizationId: actor.organizationId }, select: { id: true, name: true } }) : []).map((user) => [user.id, user.name]));
+  const [duplicates, timeline, users] = await Promise.all([
+    findLeadDuplicates(actor, { email: lead.email, phone: lead.phone, domain: lead.domain, excludeId: lead.id }),
+    prisma.activity.findMany({
+      where: { organizationId: actor.organizationId, entityType: "lead", entityId: id },
+      orderBy: { createdAt: "desc" },
+      take: 30,
+    }),
+    userIds.length ? prisma.user.findMany({ where: { id: { in: userIds }, organizationId: actor.organizationId }, select: { id: true, name: true } }) : Promise.resolve([]),
+  ]);
+  const names = new Map(users.map((user) => [user.id, user.name]));
   const assignments = lead.assignments.map((entry) => ({ ...entry, fromName: entry.fromUserId ? names.get(entry.fromUserId) ?? "Former employee" : null, toName: entry.toUserId ? names.get(entry.toUserId) ?? "Former employee" : null }));
   return { ...presentLead(lead), assignments, activities: lead.activities, opportunities: lead.opportunities, scoreEvents: lead.scoreEvents, duplicates, timeline, qualification: parseJson(lead.qualification) };
 }
@@ -133,15 +135,21 @@ function viewFilter(actor: Actor, view?: string) {
 
 async function queueCounts(actor: Actor) {
   const now = new Date();
-  const base = { AND: [{ organizationId: actor.organizationId, mergedIntoId: null }, leadScope(actor)] };
-  const [mine, unassigned, overdue, hot, nurturing] = await Promise.all([
-    prisma.lead.count({ where: { AND: [...base.AND, { OR: [{ ownerId: actor.userId }, { marketingOwnerId: actor.userId }, { salesOwnerId: actor.userId }], status: { in: OPEN_LEAD } }] } }),
-    can(actor, "leads.assign") ? prisma.lead.count({ where: { AND: [...base.AND, { ownershipStatus: "unassigned", status: { in: OPEN_LEAD } }] } }) : Promise.resolve(0),
-    prisma.lead.count({ where: { AND: [...base.AND, { nextFollowUpAt: { lt: now }, status: { notIn: CLOSED_LEAD } }] } }),
-    prisma.lead.count({ where: { AND: [...base.AND, { status: { in: OPEN_LEAD }, OR: [{ priority: { in: ["high", "critical"] } }, { score: { gte: 70 } }] }] } }),
-    prisma.lead.count({ where: { AND: [...base.AND, { status: "nurturing" }] } }),
-  ]);
-  return { mine, unassigned, overdue, hot, nurturing };
+  const visible = can(actor, "leads.assign") || can(actor, "reports.view") || can(actor, "crm.routing");
+  const scope = visible
+    ? Prisma.sql`TRUE`
+    : Prisma.sql`("ownerId" = ${actor.userId} OR "marketingOwnerId" = ${actor.userId} OR "salesOwnerId" = ${actor.userId} OR "accountManagerId" = ${actor.userId} OR EXISTS (SELECT 1 FROM "TeamMember" m WHERE m."teamId" = "Lead"."teamId" AND m."userId" = ${actor.userId}))`;
+  const [row] = await prisma.$queryRaw<Array<{ mine: number; unassigned: number; overdue: number; hot: number; nurturing: number }>>`
+    SELECT
+      count(*) FILTER (WHERE status IN ('new', 'contacted', 'working', 'qualified', 'nurturing', 'dormant') AND ("ownerId" = ${actor.userId} OR "marketingOwnerId" = ${actor.userId} OR "salesOwnerId" = ${actor.userId}))::int AS mine,
+      count(*) FILTER (WHERE ${can(actor, "leads.assign")} AND status IN ('new', 'contacted', 'working', 'qualified', 'nurturing', 'dormant') AND "ownershipStatus" = 'unassigned')::int AS unassigned,
+      count(*) FILTER (WHERE "nextFollowUpAt" < ${now} AND status NOT IN ('converted', 'lost', 'archived', 'unqualified'))::int AS overdue,
+      count(*) FILTER (WHERE status IN ('new', 'contacted', 'working', 'qualified', 'nurturing', 'dormant') AND (priority IN ('high', 'critical') OR score >= 70))::int AS hot,
+      count(*) FILTER (WHERE status = 'nurturing')::int AS nurturing
+    FROM "Lead"
+    WHERE "organizationId" = ${actor.organizationId} AND "mergedIntoId" IS NULL AND ${scope}
+  `;
+  return row ?? { mine: 0, unassigned: 0, overdue: 0, hot: 0, nurturing: 0 };
 }
 
 export async function scoreAndStore(organizationId: string, leadId: string) {
@@ -183,11 +191,11 @@ export async function assignLeads(actor: Actor, input: { leadIds: string[]; user
   const target = input.unassign ? null : await resolveAssignee(actor, input);
   const assigned: string[] = [];
   const skipped: Array<{ id: string; reason: string }> = [];
-  for (const id of ids) {
-    const outcome = await assignOne(actor, id, target, input);
-    if (outcome.ok) assigned.push(id);
-    else skipped.push({ id, reason: outcome.reason });
-  }
+  const outcomes = await Promise.all(ids.map((id) => assignOne(actor, id, target, input)));
+  outcomes.forEach((outcome, index) => {
+    if (outcome.ok) assigned.push(ids[index]!);
+    else skipped.push({ id: ids[index]!, reason: outcome.reason });
+  });
   if (!assigned.length) throw validationError(skipped[0]?.reason ?? "No leads were assigned.");
   await rememberIdempotency(prisma, actor, input.idempotencyKey, "lead-assign", assigned[0] ?? "batch");
   scheduleOutbox();
@@ -426,7 +434,6 @@ export async function createOpportunity(actor: Actor, input: { customerId: strin
 
 export async function listOpportunities(actor: Actor, query: { q?: string; stage?: string; page?: number; pageSize?: number; open?: boolean }) {
   requirePermission(actor, "opportunities.view");
-  await ensureRoleTemplates();
   const page = Math.max(1, query.page ?? 1);
   const size = Math.min(200, Math.max(1, query.pageSize ?? PAGE));
   const q = query.q?.trim().toLowerCase();
@@ -556,21 +563,35 @@ export async function createCampaign(actor: Actor, input: { name: string; channe
 
 export async function listCampaigns(actor: Actor) {
   requirePermission(actor, "campaigns.view");
-  await ensureRoleTemplates();
   const campaigns = await prisma.campaign.findMany({ where: { organizationId: actor.organizationId, archivedAt: null }, orderBy: { createdAt: "desc" }, take: 50 });
-  const reports = [];
-  for (const campaign of campaigns) {
-    const [leads, qualified, opportunities, won] = await Promise.all([
-      prisma.lead.count({ where: { campaignId: campaign.id } }),
-      prisma.lead.count({ where: { campaignId: campaign.id, status: { in: ["qualified", "converted"] } } }),
-      prisma.opportunity.count({ where: { campaignId: campaign.id } }),
-      prisma.opportunity.aggregate({ where: { campaignId: campaign.id, stage: "won" }, _sum: { valueCents: true }, _count: { _all: true } }),
-    ]);
-    const costPerLead = campaign.budgetCents && leads ? Math.round(campaign.budgetCents / leads) : null;
-    const costPerQualified = campaign.budgetCents && qualified ? Math.round(campaign.budgetCents / qualified) : null;
-    reports.push({ ...campaign, leads, qualified, opportunities, wonCount: won._count._all, wonCents: won._sum.valueCents ?? 0, costPerLead, costPerQualified });
-  }
-  return reports;
+  if (!campaigns.length) return [];
+  const ids = campaigns.map((campaign) => campaign.id);
+  const [leadGroups, qualifiedGroups, opportunityGroups, wonGroups] = await Promise.all([
+    prisma.lead.groupBy({ by: ["campaignId"], where: { campaignId: { in: ids } }, _count: { _all: true } }),
+    prisma.lead.groupBy({ by: ["campaignId"], where: { campaignId: { in: ids }, status: { in: ["qualified", "converted"] } }, _count: { _all: true } }),
+    prisma.opportunity.groupBy({ by: ["campaignId"], where: { campaignId: { in: ids } }, _count: { _all: true } }),
+    prisma.opportunity.groupBy({ by: ["campaignId"], where: { campaignId: { in: ids }, stage: "won" }, _count: { _all: true }, _sum: { valueCents: true } }),
+  ]);
+  const countOf = (rows: Array<{ campaignId: string | null; _count: { _all: number } }>) => new Map(rows.flatMap((row) => (row.campaignId ? [[row.campaignId, row._count._all] as const] : [])));
+  const leads = countOf(leadGroups);
+  const qualified = countOf(qualifiedGroups);
+  const opportunities = countOf(opportunityGroups);
+  const won = new Map(wonGroups.flatMap((row) => (row.campaignId ? [[row.campaignId, { count: row._count._all, cents: row._sum.valueCents ?? 0 }] as const] : [])));
+  return campaigns.map((campaign) => {
+    const leadCount = leads.get(campaign.id) ?? 0;
+    const qualifiedCount = qualified.get(campaign.id) ?? 0;
+    const wonRow = won.get(campaign.id);
+    return {
+      ...campaign,
+      leads: leadCount,
+      qualified: qualifiedCount,
+      opportunities: opportunities.get(campaign.id) ?? 0,
+      wonCount: wonRow?.count ?? 0,
+      wonCents: wonRow?.cents ?? 0,
+      costPerLead: campaign.budgetCents && leadCount ? Math.round(campaign.budgetCents / leadCount) : null,
+      costPerQualified: campaign.budgetCents && qualifiedCount ? Math.round(campaign.budgetCents / qualifiedCount) : null,
+    };
+  });
 }
 
 export async function createCrmActivity(actor: Actor, input: { leadId?: string; opportunityId?: string; customerId?: string; type: string; subject: string; notes?: string; dueAt?: string; priority?: string; recurrence?: string }) {
@@ -685,8 +706,10 @@ export async function dataQuality(actor: Actor) {
 export async function slaBreaches(actor: Actor) {
   requirePermission(actor, "leads.assign");
   await ensureCrmDefaults(actor.organizationId);
-  const policies = await prisma.slaPolicy.findMany({ where: { organizationId: actor.organizationId } });
-  const leads = await prisma.lead.findMany({ where: { organizationId: actor.organizationId, status: { in: ["new", "contacted"] }, lastActivityAt: null, archivedAt: null, mergedIntoId: null }, take: 100, select: { id: true, code: true, name: true, priority: true, createdAt: true, ownerId: true } });
+  const [policies, leads] = await Promise.all([
+    prisma.slaPolicy.findMany({ where: { organizationId: actor.organizationId } }),
+    prisma.lead.findMany({ where: { organizationId: actor.organizationId, status: { in: ["new", "contacted"] }, lastActivityAt: null, archivedAt: null, mergedIntoId: null }, take: 100, select: { id: true, code: true, name: true, priority: true, createdAt: true, ownerId: true } }),
+  ]);
   return leads.filter((lead) => {
     const policy = policies.find((item) => item.priority === lead.priority);
     if (!policy) return false;
@@ -712,13 +735,17 @@ export function parseLeadCsv(raw: string) {
 export async function previewLeadImport(actor: Actor, raw: string) {
   requirePermission(actor, "crm.import");
   const rows = parseLeadCsv(raw);
-  const preview = [];
-  for (const row of rows.slice(0, 50)) {
+  const sample = rows.slice(0, 50);
+  const emails = [...new Set(sample.map((row) => row.email.trim().toLowerCase()).filter((email) => email.includes("@")))];
+  const existing = emails.length
+    ? await prisma.lead.findMany({ where: { organizationId: actor.organizationId, email: { in: emails }, mergedIntoId: null }, select: { email: true, code: true } })
+    : [];
+  const byEmail = new Map(existing.flatMap((lead) => (lead.email ? [[lead.email, lead.code] as const] : [])));
+  const preview = sample.map((row) => {
     const email = row.email.trim().toLowerCase();
-    const duplicate = email ? await prisma.lead.findFirst({ where: { organizationId: actor.organizationId, email, mergedIntoId: null }, select: { id: true, code: true } }) : null;
     const error = row.name.trim().length < 2 ? "Name is required." : email && !email.includes("@") ? "Email is not valid." : "";
-    preview.push({ ...row, duplicate: duplicate?.code ?? null, error });
-  }
+    return { ...row, duplicate: byEmail.get(email) ?? null, error };
+  });
   return { total: rows.length, preview };
 }
 
@@ -729,14 +756,17 @@ export async function commitLeadImport(actor: Actor, raw: string) {
   let skipped = 0;
   let failed = 0;
   const errors: string[] = [];
+  const emails = [...new Set(rows.map((row) => row.email.trim().toLowerCase()).filter((email) => email.includes("@")))];
+  const existing = emails.length
+    ? await prisma.lead.findMany({ where: { organizationId: actor.organizationId, email: { in: emails }, mergedIntoId: null }, select: { email: true } })
+    : [];
+  const seen = new Set(existing.map((lead) => lead.email));
   for (const row of rows) {
     if (row.name.trim().length < 2) { failed += 1; errors.push(`Line ${row.line}: name is required.`); continue; }
     const email = row.email.trim().toLowerCase();
     if (email && !email.includes("@")) { failed += 1; errors.push(`Line ${row.line}: email is not valid.`); continue; }
-    if (email) {
-      const duplicate = await prisma.lead.findFirst({ where: { organizationId: actor.organizationId, email, mergedIntoId: null }, select: { id: true } });
-      if (duplicate) { skipped += 1; continue; }
-    }
+    if (email && seen.has(email)) { skipped += 1; continue; }
+    if (email) seen.add(email);
     const code = await nextCode(prisma, actor.organizationId, "lead", "LED");
     const createdLead = await prisma.lead.create({
       data: {
@@ -778,7 +808,20 @@ export async function defineCustomField(actor: Actor, input: { entityType: strin
   });
 }
 
-export async function ensureCrmDefaults(organizationId: string) {
+const crmDefaultsReady = new Map<string, Promise<void>>();
+
+export function ensureCrmDefaults(organizationId: string) {
+  const running = crmDefaultsReady.get(organizationId);
+  if (running) return running;
+  const pending = seedCrmDefaults(organizationId).catch((error: unknown) => {
+    crmDefaultsReady.delete(organizationId);
+    throw error;
+  });
+  crmDefaultsReady.set(organizationId, pending);
+  return pending;
+}
+
+async function seedCrmDefaults(organizationId: string) {
   const existing = await prisma.leadScoreRule.count({ where: { organizationId } });
   if (existing === 0) {
     await prisma.leadScoreRule.createMany({ data: DEFAULT_RULES.map((rule) => ({ organizationId, ...rule })) });
