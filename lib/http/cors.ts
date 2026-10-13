@@ -6,10 +6,21 @@ export function browserOriginAllowed(origin: string) {
     if (url.protocol !== "http:" && url.protocol !== "https:") return false;
     const host = url.hostname;
     if (host === "localhost" || host === "127.0.0.1" || host === "::1") return true;
+    if (isExpoDevHost(host)) return true;
     return isPrivateIpv4(host);
   } catch {
     return false;
   }
+}
+
+function isExpoDevHost(host: string) {
+  return (
+    host.endsWith(".expo.dev") ||
+    host.endsWith(".exp.direct") ||
+    host.endsWith(".exp.host") ||
+    host.endsWith(".ngrok-free.app") ||
+    host.endsWith(".ngrok.io")
+  );
 }
 
 function isPrivateIpv4(host: string) {
