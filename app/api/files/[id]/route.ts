@@ -2,12 +2,13 @@ import { readDocument } from "@/lib/domain/documents";
 import { actorFromToken } from "@/lib/domain/auth";
 import { AppError } from "@/lib/errors";
 import { readCookie, SESSION_COOKIE } from "@/lib/cookies";
+import { readBearer } from "@/lib/http/mobile-auth";
 
 export const runtime = "nodejs";
 
 export async function GET(req: Request, context: { params: Promise<{ id: string }> }) {
   const { id } = await context.params;
-  const token = readCookie(req.headers.get("cookie"), SESSION_COOKIE);
+  const token = readBearer(req.headers.get("authorization")) ?? readCookie(req.headers.get("cookie"), SESSION_COOKIE);
   const actor = await actorFromToken(token);
   if (!actor) return Response.json({ error: { message: "Sign in to continue." } }, { status: 401 });
   try {

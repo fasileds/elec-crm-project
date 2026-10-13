@@ -1,7 +1,7 @@
 import { AppError, validationError } from "@/lib/errors";
 import { actorFromToken, acceptInvitation, confirmPassword, loginWithPassword, logout, requestPasswordReset, resetPassword, revokeInvitation, verifyEmail, createInvitation } from "@/lib/domain/auth";
 import { addContact, archiveCustomer, createCustomer, findDuplicates, getCustomer, listCustomers, mergeCustomers } from "@/lib/domain/customers";
-import { addReminder, assignLeads, convertLead, createLead, getOpportunity, listLeads, listOpportunities, mergeLeads, transitionLead, transitionOpportunity } from "@/lib/domain/leads";
+import { addReminder, archiveOpportunity, assignLeads, completeCrmActivity, convertLead, createCampaign, createCrmActivity, createLead, dataQuality, forecast, getLead, getOpportunity, leadWorkload, listAssignableEmployees, listCampaignOptions, listCampaigns, listCrmTeams, listLeads, listOpportunities, listRoutingRules, mergeLeads, previewConversion, qualifyLead, saveRoutingRule, slaBreaches, transitionLead, transitionOpportunity } from "@/lib/domain/leads";
 import { addProjectMember, completeOnboarding, createIssue, createMilestone, createProject, getProject, listProjects, recordDecision, transitionMilestone, transitionProject } from "@/lib/domain/projects";
 import { addTaskDependency, assignTask, createTask, listTasks, transitionTask } from "@/lib/domain/tasks";
 import { baselineScope, createRequirement, decideApproval, listApprovals, transitionChange, transitionRequirement, updateRequirement } from "@/lib/domain/requirements";
@@ -9,14 +9,18 @@ import { createComment, deleteComment, editComment, listComments, setReaction } 
 import { listDocuments, saveDocument } from "@/lib/domain/documents";
 import { correctTime, listTime, logTime, setTimeStatus } from "@/lib/domain/time";
 import { listPeople, updateEmployee, workload } from "@/lib/domain/people";
-import { dashboard, exportRows, listAudit, listEmails, listLookups, listNotifications, markAllNotificationsRead, markNotificationRead, portalHome, searchAll, updateLookup, updatePreference } from "@/lib/domain/insights";
+import { dashboard, exportRows, listAudit, listEmails, listLookups, listNotifications, markAllNotificationsRead, markNotificationRead, portalHome, saveDashboardLayout, searchAll, updateLookup, updatePreference } from "@/lib/domain/insights";
 import { readCookie, SESSION_COOKIE } from "@/lib/cookies";
+import { stripForCustomer } from "@/lib/http/customer-view";
+import { hasBearer, isPublicAuthPath, readBearer } from "@/lib/http/mobile-auth";
 import { log } from "@/lib/log";
 
 type Ctx = { req: Request; actor: NonNullable<Awaited<ReturnType<typeof actorFromToken>>> | null; parts: string[]; url: URL; requestId: string };
 
 
-function assertOrigin(req: Request) {
+function assertOrigin(req: Request, parts: string[]) {
+  if (hasBearer(req.headers.get("authorization"))) return;
+  if (isPublicAuthPath(`/api/v1/${parts.join("/")}`)) return;
   const origin = req.headers.get("origin");
   if (!origin) return;
   const host = req.headers.get("host");
@@ -46,12 +50,13 @@ function routeKey(method: string, parts: string[]) {
 export async function dispatch(req: Request, parts: string[]) {
   const requestId = req.headers.get("x-request-id") ?? crypto.randomUUID();
   try {
-    if (req.method !== "GET" && req.method !== "HEAD") assertOrigin(req);
-    const actor = await actorFromToken(readCookie(req.headers.get("cookie"), SESSION_COOKIE));
+    if (req.method !== "GET" && req.method !== "HEAD") assertOrigin(req, parts);
+    const actor = await actorFromToken(readBearer(req.headers.get("authorization")) ?? readCookie(req.headers.get("cookie"), SESSION_COOKIE));
     const ctx: Ctx = { req, actor, parts, url: new URL(req.url), requestId };
     const key = routeKey(req.method, parts);
     const data = await handle(key, ctx);
-    return Response.json({ data }, { headers: { "x-request-id": requestId } });
+    const payload = actor?.kind === "customer" ? stripForCustomer(data) : data;
+    return Response.json({ data: payload }, { headers: { "x-request-id": requestId } });
   } catch (error) {
     const appError = error instanceof AppError ? error : null;
     const status = appError?.status ?? 500;
@@ -69,7 +74,7 @@ async function handle(key: string, ctx: Ctx): Promise<unknown> {
   const q = url.searchParams.get("q") ?? undefined;
   const idempotencyKey = ctx.req.headers.get("idempotency-key");
 
-  if (key === "POST auth/login") {
+  if (key === "POST auth/login" || key === "POST auth/mobile-login") {
     const input = await body(ctx.req);
     const result = await loginWithPassword({ email: text(input.email, "email")!, password: text(input.password, "password")!, ip: ctx.req.headers.get("x-forwarded-for") ?? undefined, userAgent: ctx.req.headers.get("user-agent") ?? undefined });
     return { token: result.token, user: { id: result.actor.userId, name: result.actor.name, kind: result.actor.kind } };
@@ -104,7 +109,7 @@ async function handle(key: string, ctx: Ctx): Promise<unknown> {
     await confirmPassword(actor, text(input.password, "password")!);
     return { ok: true };
   }
-  if (key === "GET auth/session") return { id: actor.userId, name: actor.name, kind: actor.kind, permissions: actor.permissions };
+  if (key === "GET auth/session") return { id: actor.userId, name: actor.name, email: actor.email, kind: actor.kind, permissions: actor.permissions, timezone: actor.timezone, locale: actor.locale, currency: actor.currency };
   if (key === "GET customers") return listCustomers(actor, { page, q, status: url.searchParams.get("status") ?? undefined, tag: url.searchParams.get("tag") ?? undefined });
   if (key === "POST customers") {
     const input = await body(ctx.req);
@@ -123,14 +128,28 @@ async function handle(key: string, ctx: Ctx): Promise<unknown> {
     return { ok: true };
   }
   if (key === "POST customers/duplicates") return findDuplicates(actor, await body(ctx.req) as { name?: string; email?: string; phone?: string });
-  if (key === "GET leads") return listLeads(actor, { page, q, status: url.searchParams.get("status") ?? undefined });
+  if (key === "GET leads") return listLeads(actor, { page, q, status: url.searchParams.get("status") ?? undefined, view: url.searchParams.get("view") || undefined, priority: url.searchParams.get("priority") || undefined, source: url.searchParams.get("source") || undefined, ownerId: url.searchParams.get("ownerId") || undefined });
   if (key === "POST leads") {
     const input = await body(ctx.req);
-    return createLead(actor, { name: text(input.name, "name")!, company: text(input.company, "company", false), email: text(input.email, "email", false), phone: text(input.phone, "phone", false), source: text(input.source, "source", false), notes: text(input.notes, "notes", false), idempotencyKey });
+    return createLead(actor, {
+      name: text(input.name, "name")!,
+      company: text(input.company, "company", false),
+      email: text(input.email, "email", false),
+      phone: text(input.phone, "phone", false),
+      source: text(input.source, "source", false),
+      industry: text(input.industry, "industry", false),
+      location: text(input.location, "location", false),
+      priority: text(input.priority, "priority", false),
+      estimatedValueCents: typeof input.estimatedValueCents === "number" ? input.estimatedValueCents : undefined,
+      campaignId: text(input.campaignId, "campaignId", false) ?? null,
+      notes: text(input.notes, "notes", false),
+      idempotencyKey,
+    });
   }
+  if (parts[0] === "leads" && parts.length === 2 && ctx.req.method === "GET") return getLead(actor, parts[1]!);
   if (parts[0] === "leads" && parts[2] === "transition") {
     const input = await body(ctx.req);
-    await transitionLead(actor, parts[1]!, text(input.status, "status")!);
+    await transitionLead(actor, parts[1]!, text(input.status, "status")!, text(input.reason, "reason", false) ?? "");
     return { ok: true };
   }
   if (parts[0] === "leads" && parts[2] === "convert") {
@@ -145,6 +164,17 @@ async function handle(key: string, ctx: Ctx): Promise<unknown> {
     }
     return convertLead(actor, parts[1]!, idempotencyKey, text(input.existingCustomerId, "existingCustomerId", false));
   }
+  if (parts[0] === "leads" && parts[2] === "qualify") {
+    const input = await body(ctx.req);
+    const qualification: Record<string, string> = {};
+    for (const key of ["budget", "authority", "need", "timeline", "use_case", "competitors", "objections"]) {
+      const value = text(input[key], key, false);
+      if (value) qualification[key] = value;
+    }
+    await qualifyLead(actor, parts[1]!, qualification);
+    return { ok: true };
+  }
+  if (parts[0] === "leads" && parts.length === 3 && parts[2] === "conversion-preview" && ctx.req.method === "GET") return previewConversion(actor, parts[1]!);
   if (parts[0] === "leads" && parts[2] === "assign") {
     const input = await body(ctx.req);
     const leadIds = Array.isArray(input.leadIds) ? input.leadIds.filter((value): value is string => typeof value === "string" && value.length > 0) : [];
@@ -156,12 +186,67 @@ async function handle(key: string, ctx: Ctx): Promise<unknown> {
     await mergeLeads(actor, text(input.sourceId, "sourceId")!, text(input.targetId, "targetId")!);
     return { ok: true };
   }
-  if (key === "GET opportunities") return listOpportunities(actor, { page, q, stage: url.searchParams.get("stage") ?? undefined });
+  if (key === "GET opportunities") return listOpportunities(actor, { page, q, stage: url.searchParams.get("stage") ?? undefined, open: url.searchParams.get("open") === "1", pageSize: Number(url.searchParams.get("pageSize") ?? 25) });
+  if (key === "GET opportunities/forecast") return forecast(actor);
   if (parts[0] === "opportunities" && parts.length === 2 && ctx.req.method === "GET") return getOpportunity(actor, parts[1]!);
   if (parts[0] === "opportunities" && parts[2] === "transition") {
     const input = await body(ctx.req);
     const result = await transitionOpportunity(actor, parts[1]!, text(input.stage, "stage")!, text(input.reason, "reason", false) ?? "", input.override === true);
     return { ok: true, ...result };
+  }
+  if (parts[0] === "opportunities" && parts[2] === "archive") {
+    const input = await body(ctx.req);
+    await archiveOpportunity(actor, parts[1]!, input.restore === true);
+    return { ok: true };
+  }
+  if (key === "GET campaigns") return listCampaigns(actor);
+  if (key === "GET campaigns/options") return listCampaignOptions(actor);
+  if (key === "POST campaigns") {
+    const input = await body(ctx.req);
+    return createCampaign(actor, {
+      name: text(input.name, "name")!,
+      channel: text(input.channel, "channel", false) ?? "other",
+      source: text(input.source, "source", false),
+      audience: text(input.audience, "audience", false),
+      startsOn: text(input.startsOn, "startsOn", false),
+      endsOn: text(input.endsOn, "endsOn", false),
+      budgetCents: typeof input.budgetCents === "number" ? input.budgetCents : undefined,
+      goal: text(input.goal, "goal", false),
+    });
+  }
+  if (key === "GET crm/assignable") return listAssignableEmployees(actor);
+  if (key === "GET crm/teams") return listCrmTeams(actor);
+  if (key === "GET crm/workload") return Object.fromEntries(await leadWorkload(actor));
+  if (key === "GET crm/quality") return dataQuality(actor);
+  if (key === "GET crm/sla") return slaBreaches(actor);
+  if (key === "GET crm/routing") return listRoutingRules(actor);
+  if (key === "POST crm/routing") {
+    const input = await body(ctx.req);
+    const userIds = Array.isArray(input.userIds) ? input.userIds.filter((id): id is string => typeof id === "string" && id.length > 0) : [];
+    return saveRoutingRule(actor, {
+      name: text(input.name, "name")!,
+      strategy: text(input.strategy, "strategy", false) ?? "round_robin",
+      userIds,
+      source: text(input.source, "source", false),
+      industry: text(input.industry, "industry", false),
+    });
+  }
+  if (key === "POST activities") {
+    const input = await body(ctx.req);
+    return createCrmActivity(actor, {
+      leadId: text(input.leadId, "leadId", false),
+      opportunityId: text(input.opportunityId, "opportunityId", false),
+      customerId: text(input.customerId, "customerId", false),
+      type: text(input.type, "type")!,
+      subject: text(input.subject, "subject")!,
+      notes: text(input.notes, "notes", false),
+      dueAt: text(input.dueAt, "dueAt", false),
+      recurrence: text(input.recurrence, "recurrence", false),
+    });
+  }
+  if (parts[0] === "activities" && parts[2] === "complete") {
+    await completeCrmActivity(actor, parts[1]!);
+    return { ok: true };
   }
   if (key === "POST reminders") {
     const input = await body(ctx.req);
@@ -296,7 +381,12 @@ async function handle(key: string, ctx: Ctx): Promise<unknown> {
     return { ok: true };
   }
   if (key === "GET search") return searchAll(actor, q ?? "");
-  if (key === "GET dashboard") return dashboard(actor);
+  if (key === "GET dashboard") return dashboard(actor, Number(url.searchParams.get("range") ?? 30));
+  if (key === "POST dashboard/layout") {
+    const input = await body(ctx.req);
+    const widgets = Array.isArray(input.widgets) ? input.widgets.filter((widget): widget is string => typeof widget === "string") : [];
+    return saveDashboardLayout(actor, widgets);
+  }
   if (key === "GET portal") return portalHome(actor);
   if (parts[0] === "exports" && parts[1] && ctx.req.method === "GET") {
     const type = parts[1];

@@ -7,6 +7,9 @@ import { formatMoney, parseMoneyToCents } from "@/lib/money";
 import { isPastDate, todayInTimeZone } from "@/lib/dates";
 import { canTransition, PROJECT_TRANSITIONS } from "@/lib/domain/workflow";
 import { arrangeWidgets, lensFor, moveWidget, widgetsFor } from "@/lib/domain/dashboard-layout";
+import { stripForCustomer } from "@/lib/http/customer-view";
+import { browserOriginAllowed } from "@/lib/http/cors";
+import { finishLogin, hasApiBearer, isPublicAuthPath, readBearer } from "@/lib/http/mobile-auth";
 
 describe("project health", () => {
   it("stays healthy when nothing is late", () => {
@@ -55,6 +58,58 @@ describe("workflow", () => {
   it("refuses an illegal project jump", () => {
     expect(canTransition(PROJECT_TRANSITIONS, "draft", "active")).toBe(false);
     expect(canTransition(PROJECT_TRANSITIONS, "planning", "active")).toBe(true);
+  });
+});
+
+describe("mobile session transport", () => {
+  it("reads a bearer token and ignores other authorization schemes", () => {
+    expect(readBearer("Bearer opaque-session")).toBe("opaque-session");
+    expect(readBearer("bearer opaque-session")).toBe("opaque-session");
+    expect(readBearer("Basic opaque-session")).toBeUndefined();
+    expect(readBearer(null)).toBeUndefined();
+  });
+
+  it("keeps the website on the cookie and returns the token once for mobile", () => {
+    const payload = { data: { token: "opaque-session", user: { id: "user-1", kind: "employee" } } };
+    const website = finishLogin(["auth", "login"])!.present(payload);
+    const mobile = finishLogin(["auth", "mobile-login"])!.present(payload);
+    expect(website.cookie).toBe("opaque-session");
+    expect(website.body).toEqual({ data: { user: payload.data.user } });
+    expect(JSON.stringify(website.body)).not.toContain("opaque-session");
+    expect(mobile.cookie).toBeNull();
+    expect(mobile.body).toEqual({ data: { token: "opaque-session", user: payload.data.user } });
+    expect(finishLogin(["auth", "logout"])).toBeNull();
+    expect(isPublicAuthPath("/api/v1/auth/mobile-login")).toBe(true);
+    expect(isPublicAuthPath("/api/v1/auth/login")).toBe(true);
+    expect(isPublicAuthPath("/api/v1/dashboard")).toBe(false);
+    expect(hasApiBearer("/api/v1/dashboard", "Bearer opaque-session")).toBe(true);
+    expect(hasApiBearer("/dashboard", "Bearer opaque-session")).toBe(false);
+    expect(hasApiBearer("/api/v1/dashboard", null)).toBe(false);
+    expect(browserOriginAllowed("http://localhost:8081")).toBe(true);
+    expect(browserOriginAllowed("http://192.168.1.20:8081")).toBe(true);
+    expect(browserOriginAllowed("https://evil.example")).toBe(false);
+  });
+});
+
+describe("customer api view", () => {
+  it("removes internal notes, unpublished files, and secrets", () => {
+    const when = new Date("2026-10-09T12:00:00Z");
+    expect(
+      stripForCustomer({
+        at: when,
+        customer: { name: "Northwind", notes: "internal margin", searchText: "internal margin" },
+        documents: [
+          { fileName: "shared.pdf", visibility: "customer" },
+          { fileName: "brief.pdf" },
+          { fileName: "draft.docx", visibility: "internal", storageKey: "object-key" },
+        ],
+        token: "opaque-session",
+      }),
+    ).toEqual({
+      at: when,
+      customer: { name: "Northwind" },
+      documents: [{ fileName: "shared.pdf", visibility: "customer" }, { fileName: "brief.pdf" }],
+    });
   });
 });
 
